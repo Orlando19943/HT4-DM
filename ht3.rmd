@@ -1,0 +1,187 @@
+---
+title: "R Notebook"
+output: html_document
+---
+Librerías a utilizar
+```{r, message=FALSE,warning=FALSE}
+library(hopkins)
+library(factoextra)
+library(NbClust)
+library(mice)
+library(dplyr)
+library(ggplot2)
+library(heatmaply)
+library(plotly)
+library(reshape2)
+library(ggcorrplot)
+library(tidyverse)
+library(ppclust)
+library(cluster)
+library(mclust)
+```
+Funciones generales
+```{r}
+# Extraído de: https://community.rstudio.com/t/is-there-a-function-to-replace-outliers/85091/6
+replaceOutliers <- function(c) {
+  b <- boxplot(c, plot = FALSE)
+  s1 <- c
+  s1[which(c %in% b$out)] <- mean(c[which(! c %in% b$out)],na.rm=TRUE)
+  return(s1)
+}
+```
+Lectura del dataset
+```{r, message=FALSE,warning=FALSE}
+# train <- read.csv("train.csv")
+train_original <- read.csv("train.csv")
+```
+Variables cuantitativas
+* budget
+* revenue
+* actorsPopularity
+* popularity
+* runtime
+* genresAmount
+* productionCoAmount
+* productionCountriesAmount
+* voteCount
+* actorsAmount
+* castWomenAmount
+* castMenAmount
+
+
+# Preprocesamiento de datos
+Explique qué variables no aportan información a la generación de grupos y por qué. Describa con qué variables calculará los grupos.
+
+Debido a que los algoritmos de clustering que se utilizarán realizan la agrupación por medio de la medición de distancias entre las observaciones, por lo tal, las variables cualitativas no aportan información a la generación de grupos. Por otro lado, debido a que el promedio de votos se ve afectada por la cantidad de personas que votaron, y esto puede ser solo una persona, se determina que no es una variable que objetivamente pueda brindar información significativa al agrupamiento de los datos.
+
+### Preparación de variables
+Si bien, dentro del dataset se cuenta con la popularidad de los actores, sin embargo al ser una lista, no proporciona información general de la popularidad del cast de la película, debido a esto, se trabajará con el promedio de la popularidad de los actores dentro de la película como la popularidad promedio del cast.
+
+## Detección de valores perdidos
+```{r}
+# Dejando únicamente los casos completos para poder trabajar el agrupamiento
+cuantitative = c('LotFrontage', 'LotArea', 'MiscVal', 'WoodDeckSF', 'OpenPorchSF', 'EnclosedPorch', 'X3SsnPorch', 'ScreenPorch', 'PoolArea', 'GarageArea', 'GrLivArea', 'LowQualFinSF', 'X2ndFlrSF', 'X1stFlrSF', 'TotalBsmtSF', 'BsmtUnfSF', 'BsmtFinSF2', 'BsmtFinSF1', 'MasVnrArea', 'BsmtFullBath', 'BsmtHalfBath', 'FullBath', 'HalfBath', 'KitchenAbvGr', 'TotRmsAbvGrd', 'Fireplaces', 'GarageCars', 'SalePrice')
+train <- train[complete.cases(train[ , (names(train) %in% cuantitative)]), ]
+train_original <- train_original[complete.cases(train_original[ , (names(train) %in% cuantitative)]), ]
+# clean_train <- clean_train[ , (names(clean_train) %in% usable)]
+```
+Durante el proceso de detección de valores perdidos, también se encontraron valores anómalos, como observaciones en las cuales el presupuesto dado para la película es de 0, sin embargo, aún así, está obtuvo ganancias. Debido a que se consideran como valores erróneos, se decidió eliminar dichas observaciones de los datos a utilizar en el agrupamiento
+## Filtrado de outliers
+Para el tratamiento de outliers, en lugar de eliminar las observaciones que cuentan con datos atípicos, una mejor práctica es imputar dichos datos con la media o mediana.
+```{r}
+clean_train <- train[ , (names(train) %in% cuantitative)]
+columns <- names(clean_train)
+replace <- purrr::map_dfc(columns, ~replaceOutliers(train[[.]]))
+replace <- replace %>% set_names(columns)
+for (x in columns){
+  train[, x] <- replace[, x]
+}
+clean_train
+```
+
+## Correlación entre variables
+```{r}
+# NO EJECUTAR
+# clean_train <- train[ , (names(train) %in% cuantitative)]
+correlation <- cor(clean_train, method="spearman")
+p.mat <- cor_pmat(clean_train)
+ggcorrplot(correlation, hc.order = TRUE, type = "lower",
+   outline.col = "white",
+   ggtheme = ggplot2::theme_gray,
+   colors = c("#6D9EC1", "white", "#E46726"),
+    lab = TRUE)
+correlation
+```
+Con base en la correlación de las variables y para faciliar el procesos de agrupamiento y disminuir la dimensión de variables a agrupar, se sabe que se puede utilizar únicamente una de las variables correlacionadas. En este caso, las variables altamente correlacionadas son:
+* Presupuesto con Ganancias
+* Presupuesto con Cantidad de hombres en el cast
+* Ganancias con Cantidad de votos
+* Cantidad de actores con Cantidad de mujeres en el cast
+* Cantidad de actores con Cantidad de hombres en el cast
+Con base en lo anterior, se dejaran fuera las siguientes variables para el agrupamiento:
+* Presupuesto
+* Cantidad de hombres en el cast
+* Cantidad de mujeres en el cast
+* Cantidad de votos
+
+## Estandarización de variables
+Todas las características estén en un mismo rango de valores
+```{r}
+usable <- c('FullBath', 'GrLivArea', 'TotRmsAbvGrd', 'Fireplaces', 'MasVnrArea', 'X1stFlrSF', 'GarageCars', 'GarageArea', 'SalePrice')
+clean_train <- clean_train[ , (names(clean_train) %in% usable)]
+data <- as.matrix(clean_train)
+barplot(data, beside = TRUE, main = 'Comparación de observaciones', las=2)
+# Normalizar únicamente las variables númericas sin tener que crear otro df
+# Esto hay que cambiarlo, pero por ahora sirve xd
+train <- mutate_if(train, is.numeric, scale)
+```
+
+## ¿Cuál es el número de grupos a formar para los datos?
+Haga una gráfica de codo y explique la razón de la elección de la cantidad de clústeres con la que trabajará.
+### Cantidad óptima de grupos según gráfica de codo
+```{r, message=FALSE,warning=FALSE}
+fviz_nbclust(clean_train, kmeans, method = "wss") +
+labs(subtitle = "Número óptimo de clusters elbow-method")
+```
+### Cantidad óptima de grupos según paquete NbClust
+```{r}
+groups <- NbClust(clean_train, distance = "euclidean", min.nc = 2,
+              max.nc = 10, method = "complete", index ="all")
+```
+Con base en la gráfica del codo, y en el cálculo del número de clusters por 30 algoritmos diferentes, se considera que la cantidad adecuada de agrupamiento de los datos es 3.
+
+# Algoritmos de agrupamiento
+## K-Medias
+```{r}
+km<-kmeans(clean_train,3,iter.max =300)
+kmeans_groups <- km$cluster
+```
+```{r}
+fviz_cluster(km, data = clean_train,geom = "point", ellipse.type = "norm")
+```
+
+### Silueta para k-means
+```{r silueta clustering jerarquico k-means}
+silkm<-silhouette(km$cluster,dist(clean_train))
+mean(silkm[,3])
+```
+Vamos a graficar la silueta para visualizar los resultados de cada cluster
+```{r grafico de silueta clusterig jerarquico 1}
+fviz_silhouette(sil.obj = silkm, print.summary = TRUE, palette = "jco", ggtheme = theme_classic())
+```
+
+```{r}
+results <- table(train_original$SalePrice, kmeans_groups)
+results <- as.data.frame(results)
+results$Var1 <- as.numeric(as.character(results$Var1))
+results$kmeans_groups <- as.numeric(as.character(results$kmeans_groups))
+group1 <- subset(results, kmeans_groups == 1 & Freq > 0)
+group2 <- subset(results, kmeans_groups == 2 & Freq > 0)
+group3 <- subset(results, kmeans_groups == 3 & Freq > 0)
+
+group1
+
+
+```
+```{r}
+min(group1$Var1)
+max(group1$Var1)
+```
+```{r}
+plot(x = group1$Freq, y= group1$Var1)
+```
+```{r}
+min(group2$Var1)
+max(group2$Var1)
+```
+```{r}
+plot(x = group2$Freq, y= group2$Var1)
+```
+```{r}
+# Grupo 3
+min(group3$Var1)
+max(group3$Var1)
+```
+```{r}
+plot(x = group3$Freq, y= group3$Var1)
+```
